@@ -1,5 +1,8 @@
 package ureka.framework.logic.stage_worker;
 
+import com.example.urekaapp.AdminAgentActivity;
+import com.example.urekaapp.VoterAgentActivity;
+
 import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
@@ -21,7 +24,7 @@ import ureka.framework.resource.communication.bluetooth.BluetoothService;
 import ureka.framework.resource.crypto.SerializationUtil;
 import ureka.framework.resource.logger.SimpleLogger;
 
-public class MsgReceiver implements Runnable {
+public class MsgReceiver {
     private SharedData sharedData = null;
     private MeasureHelper measureHelper = null;
     private MsgVerifier msgVerifier = null;
@@ -168,12 +171,7 @@ public class MsgReceiver implements Runnable {
 
     // [STAGE: (R)] Receive Message
     public void _recvXxxMessage(String data) {
-        if (data.contains("REQUEST: ")) {
-            String croppedData = data.substring(0, "REQUEST: ".length());
-
-            Map<String, String> arbitraryDict = SerializationUtil.jsonStrToDict(croppedData);
-            this.getFlowIssueUTicket().issuerIssueUTicketToHolder(arbitraryDict);
-        }
+        SimpleLogger.simpleLog("info", "Received: " + data);
 
         String receivedMessageWithHeader = "";
         if (Objects.equals(Environment.DEPLOYMENT_ENV, "TEST")) {
@@ -190,6 +188,22 @@ public class MsgReceiver implements Runnable {
             this.sharedData.setReceivedMessageJson(UTicket.uTicketToJsonStr((UTicket) receivedMessage));
         } else if (receivedMessage instanceof RTicket) {
             this.sharedData.setReceivedMessageJson(RTicket.rTicketToJsonStr((RTicket) receivedMessage));
+        } else if (receivedMessage instanceof String) {
+            String messageStr = (String) receivedMessage;
+            Map<String, String> messageMap = SerializationUtil.jsonToMap(messageStr);
+            if (messageMap.containsKey("candidate_0")) {
+                // Handle Permissionless
+                AdminAgentActivity.sendNextTicket = true;
+                VoterAgentActivity.sendNextTicket = true;
+                AdminAgentActivity.permissionlessData = messageStr;
+                VoterAgentActivity.permissionlessData = messageStr;
+                return;
+            } else {
+                // Handle Request UTicket
+                String receivedMessageStr = (String) receivedMessage;
+                this.sharedData.setReceivedMessageJson(receivedMessageStr);
+                this.flowIssueUTicket.issuerIssueUTicketToHolder(SerializationUtil.jsonToMap(receivedMessageStr));
+            }
         }
 
         SimpleLogger.simpleLog("cli", "Received Message: " + this.sharedData.getReceivedMessageJson());
@@ -221,9 +235,15 @@ public class MsgReceiver implements Runnable {
                 this.flowOpenSession._holderRecvCrKe3((RTicket) receivedMessage);
                 SimpleLogger.simpleLog("cli", "plaintextData in " + this.sharedData.getThisDevice().getDeviceName() + " = " + this.sharedData.getCurrentSession().getPlaintextData());
                 SimpleLogger.simpleLog("cli", "+++Session is Constructed+++");
+                AdminAgentActivity.sendNextTicket = true;
+                VoterAgentActivity.sendNextTicket = true;
+                SimpleLogger.simpleLog("info", "Ready to send next ticket");
             } else if (state.equals(ThisDevice.STATE_AGENT_WAIT_FOR_DATA)) {
                 this.flowIssueUToken._holderRecvData((RTicket) receivedMessage);
                 SimpleLogger.simpleLog("cli", "plaintextData in " + this.sharedData.getThisDevice().getDeviceName() + " = " + this.sharedData.getCurrentSession().getPlaintextData());
+                AdminAgentActivity.sendNextTicket = true;
+                VoterAgentActivity.sendNextTicket = true;
+                SimpleLogger.simpleLog("info", "Ready to send next ticket");
             } else { // pragma: no cover -> Shouldn't Reach Here
                 throw new RuntimeException("Shouldn't Reach Here");
             }
@@ -232,117 +252,6 @@ public class MsgReceiver implements Runnable {
             throw error;
         } catch (Exception error) {
             throw new RuntimeException("Shouldn't Reach Here", error);
-        }
-}
-
-    // _recvXxxMessage?
-    @Override
-    public void run() {
-        if (Environment.COMMUNICATION_CHANNEL.equals("SIMULATED")) {
-            this.msgSender.startSimulatedComm();
-        } else if (Environment.COMMUNICATION_CHANNEL.equals("BLUETOOTH")) {
-//            this.msgSender.startBluetoothComm();
-        }
-
-        while (true) {
-            try {
-                // [STAGE: (R)]
-                String receivedMessageWithHeader = null;
-
-                if (Environment.COMMUNICATION_CHANNEL.equals("SIMULATED")) {
-                    if (this.sharedData.getSimulatedCommCompletedFlag()) {
-                        break;
-                    }
-                    Queue<String> receiverQueue = this.sharedData.getSimulatedCommChannel().getReceiverQueue();
-                    if (Environment.DEPLOYMENT_ENV.equals("TEST")) {
-                        // This will block until message is received
-                        receivedMessageWithHeader = receiverQueue.poll();
-                    } else if (Environment.DEPLOYMENT_ENV.equals("PRODUCTION")) {
-                        // This will block until message is received all until timeout
-//                        receivedMessageWithHeader = receiverQueue.poll((long) Environment.SIMULATED_COMM_TIME_OUT, TimeUnit.SECONDS);
-                        if (receivedMessageWithHeader == null) {
-                            throw new TimeoutException("Simulated communication timeout");
-                        }
-                    }
-
-//                    SimpleLogger.simpleLog("info", "+ " + this.sharedData.getThisDevice().getDeviceName() + " is receiving message from "
-//                                    + this.sharedData.getSimulatedCommChannel().getEnd().getSharedData().getThisDevice().getDeviceName() + "...");
-                } else if (Environment.COMMUNICATION_CHANNEL.equals("BLUETOOTH")) { // pragma: no cover -> PRODUCTION
-                    // Start Comm Measurement
-//                    if (this.sharedData.getBluetoothCommCompletedFlag()) {
-//                        break;
-//                    }
-////                    receivedMessageWithHeader = this.sharedData.getConnectionSocket().recvMessage();
-//                    this.measureHelper.measureCommTime("_recvMessage");
-//
-//                    SimpleLogger.simpleLog("info", "+ " + this.sharedData.getThisDevice().getDeviceName() + " is receiving message from BT_address or BT_name...");
-                }
-
-                // Message Size Measurement
-                this.measureHelper.measureMessageSize("_recvMessage", receivedMessageWithHeader);
-                // Start Process Measurement
-                this.measureHelper.measureProcessPerfStart();
-
-                // [STAGE: (VR)]
-                Object receivedMessage = this.msgVerifier._classifyMessageIsDefinedType(receivedMessageWithHeader);
-                if (receivedMessage instanceof UTicket) {
-                    this.sharedData.setReceivedMessageJson(UTicket.uTicketToJsonStr((UTicket) receivedMessage));
-                } else if (receivedMessage instanceof RTicket) {
-                    this.sharedData.setReceivedMessageJson(RTicket.rTicketToJsonStr((RTicket) receivedMessage));
-                }
-
-                SimpleLogger.simpleLog("cli", "Received Message: " + this.sharedData.getReceivedMessageJson());
-
-                // IOT_DEVICE
-                String state = this.sharedData.getState();
-                if (state.equals(ThisDevice.STATE_DEVICE_WAIT_FOR_UT)) {
-                    this.flowApplyUTicket._deviceRecvUTicket((UTicket) receivedMessage);
-                } else if (state.equals(ThisDevice.STATE_DEVICE_WAIT_FOR_CRKE2)) {
-                    this.flowOpenSession._deviceRecvCrKe2((RTicket) receivedMessage);
-                    SimpleLogger.simpleLog("cli", "plaintextCmd in " + this.sharedData.getThisDevice().getDeviceName() + " = " + this.sharedData.getCurrentSession().getPlaintextCmd());
-                } else if (state.equals(ThisDevice.STATE_DEVICE_WAIT_FOR_CMD)) {
-                    this.flowIssueUToken._deviceRecvCmd((UTicket) receivedMessage);
-                    SimpleLogger.simpleLog("cli", "plaintextCmd in " + this.sharedData.getThisDevice().getDeviceName() + " = " + this.sharedData.getCurrentSession().getPlaintextCmd());
-                }
-                // USER_AGENT_OR_CLOUD_SERVER
-                else if (state.equals(ThisDevice.STATE_AGENT_WAIT_FOR_UREQ_UREJ_UT_RT)) {
-                    if (receivedMessage instanceof UTicket) {
-                        this.flowIssueUTicket._holderRecvUTicket((UTicket) receivedMessage);
-                    } else if (receivedMessage instanceof RTicket) {
-                        this.flowIssueUTicket._issuerRecvRTicket((RTicket) receivedMessage);
-                    }
-                } else if (state.equals(ThisDevice.STATE_AGENT_WAIT_FOR_RT)) {
-                    this.flowApplyUTicket._holderRecvRTicket((RTicket) receivedMessage);
-                } else if (state.equals(ThisDevice.STATE_AGENT_WAIT_FOR_CRKE1)) {
-                    this.flowOpenSession._holderRecvCrKe1((RTicket) receivedMessage);
-                } else if (state.equals(ThisDevice.STATE_AGENT_WAIT_FOR_CRKE3)) {
-                    this.flowOpenSession._holderRecvCrKe3((RTicket) receivedMessage);
-                    SimpleLogger.simpleLog("cli", "plaintextData in " + this.sharedData.getThisDevice().getDeviceName() + " = " + this.sharedData.getCurrentSession().getPlaintextData());
-                    SimpleLogger.simpleLog("cli", "+++Session is Constructed+++");
-                } else if (state.equals(ThisDevice.STATE_AGENT_WAIT_FOR_DATA)) {
-//                    this.flowIssueUToken._holderRecvData(receivedMessage);
-                    SimpleLogger.simpleLog("cli", "plaintextData in " + this.sharedData.getThisDevice().getDeviceName() + " = " + this.sharedData.getCurrentSession().getPlaintextData());
-                } else { // pragma: no cover -> Shouldn't Reach Here
-                    throw new RuntimeException("Shouldn't Reach Here");
-                }
-            } catch (TimeoutException error) { // Automatically Finish Simulated Comm
-                SimpleLogger.simpleLog("debug", "+ " + this.sharedData.getThisDevice().getDeviceName() + " automatically terminate receiver thread (simulated comm) after Timeout (" + Environment.SIMULATED_COMM_TIME_OUT + " seconds)~~");
-                if (Environment.COMMUNICATION_CHANNEL.equals("SIMULATED")) {
-                    this.msgSender.completeSimulatedComm();
-                }
-                break;
-//            } catch (InterruptedException error) {
-//                SimpleLogger.simpleLog("debug", "+ " + this.sharedData.getThisDevice().getDeviceName() + " automatically terminate receiver thread (simulated comm) after Timeout (" + Environment.SIMULATED_COMM_TIME_OUT + " seconds)~~");
-//                if (Environment.COMMUNICATION_CHANNEL.equals("SIMULATED")) {
-//                    this.msgSender.completeSimulatedComm();
-//                }
-//                break;
-            } catch (RuntimeException error) {
-                this.sharedData.setResultMessage(error.getMessage());
-                throw error;
-            } catch (Exception error) {
-                throw new RuntimeException("Shouldn't Reach Here", error);
-            }
         }
     }
 }

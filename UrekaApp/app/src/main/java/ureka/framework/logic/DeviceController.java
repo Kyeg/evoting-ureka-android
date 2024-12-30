@@ -18,6 +18,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
 
 import java.util.HashMap;
+import java.util.Objects;
 
 import ureka.framework.Environment;
 import ureka.framework.logic.pipeline_flow.FlowApplyUTicket;
@@ -51,7 +52,11 @@ public class DeviceController {
     private GeneratedMsgStorer generatedMsgStorer;
     private MsgSender msgSender;
     private MsgReceiver msgReceiver;
+
+    private BLEViewModel bleViewModel;
     private BLEManager bleManager;
+
+    private NearbyViewModel nearbyViewModel;
     private NearbyManager nearbyManager;
     // Flow
     private FlowIssueUTicket flowIssuerIssueUTicket;
@@ -62,9 +67,10 @@ public class DeviceController {
     public DeviceController(String deviceType, String deviceName) {
         this._initialize(deviceType, deviceName, Environment.applicationContext);
     }
+
     private void _initialize(String deviceType, String deviceName, Context context) {
-        BLEViewModel bleViewModel = new ViewModelProvider((AppCompatActivity) context).get(BLEViewModel.class);
-        NearbyViewModel nearbyViewModel = new ViewModelProvider((AppCompatActivity) context).get(NearbyViewModel.class);
+        this.bleViewModel = new ViewModelProvider((AppCompatActivity) context).get(BLEViewModel.class);
+        this.nearbyViewModel = new ViewModelProvider((AppCompatActivity) context).get(NearbyViewModel.class);
 
         this.sharedData = new SharedData(new ThisDevice(), new CurrentSession(), new ThisPerson());
         this.simpleStorage = new SimpleStorage(deviceName);
@@ -82,8 +88,10 @@ public class DeviceController {
         this.executor = new Executor(this.sharedData, this.measureHelper, this.simpleStorage, this.msgVerifier);
         this.msgGenerator = new MsgGenerator(this.sharedData, this.measureHelper);
         this.generatedMsgStorer = new GeneratedMsgStorer(this.sharedData, this.measureHelper, this.simpleStorage);
-        this.bleManager = bleViewModel.getBLEManager(context);
-        this.nearbyManager = nearbyViewModel.getNearbyManager(context, this.msgReceiver);
+        this.bleManager = this.bleViewModel.getBLEManager(context);
+        this.bleManager.setViewModel(this.bleViewModel);
+        this.nearbyManager = this.nearbyViewModel.getNearbyManager(context, this.msgReceiver);
+        this.nearbyManager.setViewModel(this.nearbyViewModel);
         this.msgSender = new MsgSender(this.sharedData, this.measureHelper, this.bleManager, this.nearbyManager);
 
         // Flow
@@ -251,42 +259,79 @@ public class DeviceController {
         this.flowIssueUToken = flowIssueUToken;
     }
 
+    public BLEManager getBleManager() {
+        return bleManager;
+    }
+
+    public void setBleManager(BLEManager bleManager) {
+        this.bleManager = bleManager;
+    }
+
+    public BLEViewModel getBleViewModel() {return bleViewModel; }
+
+    public void setBleViewModel(BLEViewModel bleViewModel) {
+        this.bleViewModel = bleViewModel;
+    }
+
+    public NearbyManager getNearbyManager() {
+        return nearbyManager;
+    }
+
+    public void setNearbyManager(NearbyManager nearbyManager) {
+        this.nearbyManager = nearbyManager;
+    }
+
+    public NearbyViewModel getNearbyViewModel() {
+        return nearbyViewModel;
+    }
+
+    public void setNearbyViewModel(NearbyViewModel nearbyViewModel) {
+        this.nearbyViewModel = nearbyViewModel;
+    }
+
     public void connectToDevice(String deviceName, Runnable onConnected, Runnable onDisconnected, TextView textView) {
-        this.bleManager.startScan(deviceName, new BLEManager.BLECallback() {
-            final StringBuilder jsonBuilder = new StringBuilder();
-            @Override
-            public void onConnected() {
-                SimpleLogger.simpleLog("info", "Device connected!");
-                new Handler(Looper.getMainLooper()).post(() ->
-                        textView.setText("Device connected!")
-                );
-                onConnected.run();
-            }
-
-            @Override
-            public void onDisconnected() {
-                SimpleLogger.simpleLog("info", "Device disconnected!");
-                new Handler(Looper.getMainLooper()).post(() ->
-                        textView.setText("Device disconnected!")
-                );
-                onDisconnected.run();
-            }
-
-            @Override
-            public void onDataReceived(String data) {
-                SimpleLogger.simpleLog("info", "Received data: " + data);
-                new Handler(Looper.getMainLooper()).post(() ->
-                        textView.setText("Data received.")
-                );
-                jsonBuilder.append(data);
-
-                if (data.contains("$")) {
-                    msgReceiver._recvXxxMessage(jsonBuilder.toString());
-                    jsonBuilder.setLength(0);
-                } else {
-                    Log.d("Bluetooth.onDataReceived", "Waiting for more data to complete JSON.");
+        new Thread(() -> {
+            this.bleManager.startScan(deviceName, new BLEManager.BLECallback() {
+                final StringBuilder jsonBuilder = new StringBuilder();
+                @Override
+                public void onConnected() {
+                    SimpleLogger.simpleLog("info", "Device connected!");
+//                    new Handler(Looper.getMainLooper()).post(() ->
+//                            textView.setText("Device connected!")
+//                    );
+                    onConnected.run();
                 }
-            }
-        });
+
+                @Override
+                public void onDisconnected() {
+                    SimpleLogger.simpleLog("info", "Device disconnected!");
+//                    new Handler(Looper.getMainLooper()).post(() ->
+//                            textView.setText("Device disconnected!")
+//                    );
+                    onDisconnected.run();
+                }
+
+                @Override
+                public void onDataReceived(String data) {
+                    SimpleLogger.simpleLog("info", "Received data: " + data);
+//                    new Handler(Looper.getMainLooper()).post(() ->
+//                            textView.setText("Data received from voting machine.")
+//                    );
+                    jsonBuilder.append(data);
+
+                    if (data.contains("freed")) {
+                        SimpleLogger.simpleLog("info", "No hello thank you");
+                        jsonBuilder.setLength(0);
+                    } else if (data.contains("$")) {
+                        Log.d("Bluetooth.onDataReceived", "Received complete JSON: starting process.");
+                        jsonBuilder.deleteCharAt(jsonBuilder.length() - 1);
+                        msgReceiver._recvXxxMessage(jsonBuilder.toString());
+                        jsonBuilder.setLength(0);
+                    } else {
+                        Log.d("Bluetooth.onDataReceived", "Waiting for more data to complete JSON.");
+                    }
+                }
+            });
+        }).start();
     }
 }

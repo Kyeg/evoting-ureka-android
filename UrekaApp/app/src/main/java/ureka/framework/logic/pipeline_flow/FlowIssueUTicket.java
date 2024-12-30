@@ -1,6 +1,7 @@
 package ureka.framework.logic.pipeline_flow;
 
 import com.example.urekaapp.AdminAgentActivity;
+import com.example.urekaapp.VoterAgentActivity;
 
 import java.security.KeyException;
 import java.util.Map;
@@ -122,12 +123,13 @@ public class FlowIssueUTicket {
             (e.g., if CR or PS is Timeout, device can revert to the WAIT_FOR_UT state)
     */
 
-    public void issuerIssueUTicketToHerself(String deviceId, Map<String, String> arbitraryDict) {
+    public void issuerIssueUTicketToHerself(String device_id, Map<String, String> arbitraryDict) {
         // Start Process Measurement
         this.measureHelper.measureProcessPerfStart();
         try {
             // [STAGE: (VL)]
-            if (this.sharedData.getDeviceTable().containsKey(deviceId) || "noId".equals(deviceId)) {
+            SimpleLogger.simpleLog("info", "deviceId = " + device_id + ", containing = " + (this.sharedData.getDeviceTable().containsKey(device_id) || "no_id".equals(device_id)));
+            if (this.sharedData.getDeviceTable().containsKey(device_id) || "no_id".equals(device_id)) {
                 // [STAGE: (G)]
                 String generatedUTicketJson = this.msgGenerator.generateXxxUTicket(arbitraryDict);
 
@@ -159,10 +161,11 @@ public class FlowIssueUTicket {
             // [STAGE: (VL)]
             if (this.sharedData.getDeviceTable().containsKey(AdminAgentActivity.connectedDeviceId)) {
                 // [STAGE: (G)]
+                arbitraryDict.put("device_id", AdminAgentActivity.connectedDeviceId);
                 String generatedUTicketJson = this.msgGenerator.generateXxxUTicket(arbitraryDict);
-                UTicket generatedUTicket = UTicket.jsonStrToUTicket(generatedUTicketJson);
-                generatedUTicket.setDeviceId(AdminAgentActivity.connectedDeviceId);
-                generatedUTicketJson = UTicket.uTicketToJsonStr(generatedUTicket);
+//                UTicket generatedUTicket = UTicket.jsonStrToUTicket(generatedUTicketJson);
+//                generatedUTicket.setDeviceId(AdminAgentActivity.connectedDeviceId);
+//                generatedUTicketJson = UTicket.uTicketToJsonStr(generatedUTicket);
 
                 // [STAGE: (SG)]
                 this.generatedMsgStorer.storeGeneratedXxxUTicket(generatedUTicketJson);
@@ -181,6 +184,8 @@ public class FlowIssueUTicket {
                         UTicket.MESSAGE_TYPE,
                         generatedUTicketJson
                 );
+            } else {
+                SimpleLogger.simpleLog("info", "FlowIssueUTicket.issuerIssueUTicketToHolder: Device not in device table");
             }
         } catch (RuntimeException e) { // pragma: no cover -> Weird Ticket-Request (ValidationError)
             SimpleLogger.simpleLog("error", "FAILURE: (VUREQ)");
@@ -203,6 +208,7 @@ public class FlowIssueUTicket {
             */
 
             // [STAGE: (SR)]
+            VoterAgentActivity.connectedDeviceId = receivedUTicket.getDeviceId();
             this.receivedMsgStorer.storeReceivedXxxUTicket(receivedUTicket);
 
             // [STAGE: (O)]
@@ -223,12 +229,12 @@ public class FlowIssueUTicket {
         }
     }
 
-    public void holderSendRTicketToIssuer(String deviceId) {
+    public void holderSendRTicketToIssuer(String device_id) {
         // Start Process Measurement
         this.measureHelper.measureProcessPerfStart();
         try {
             // [STAGE: (VL)(L)]
-            String storedRTicketJson = this.sharedData.getDeviceTable().get(deviceId).getDeviceRTicketForOwner();
+            String storedRTicketJson = this.sharedData.getDeviceTable().get(device_id).getDeviceRTicketForOwner();
 
             // End Process Measurement
             this.measureHelper.measureRecvCliPerfTime("holderSendRTicketToIssuer");
@@ -239,11 +245,12 @@ public class FlowIssueUTicket {
             }
 
             // [STAGE: (S)]
-            this.msgSender.sendXxxMessage(
+            this.msgSender.sendXxxMessageByNearby(
                     Message.MESSAGE_RECV_AND_STORE,
                     RTicket.MESSAGE_TYPE,
                     storedRTicketJson
             );
+            VoterAgentActivity.sendNextTicket = true;
         } catch (Exception e) { // pragma: no cover -> Shouldn't Reach Here
             throw new RuntimeException("Shouldn't Reach Here", e);
         }
@@ -264,7 +271,7 @@ public class FlowIssueUTicket {
                     receivedRTicket.getRTicketType().equals(UTicket.TYPE_OWNERSHIP_UTICKET) ||
                     receivedRTicket.getRTicketType().equals(UTicket.TYPE_ACCESS_END_UTOKEN)) {
                 // Query Corresponding UTicket(s)
-                //    Notice that even Initialization UTicket is copied in the deviceTable["deviceId"]
+                //    Notice that even Initialization UTicket is copied in the deviceTable["device_id"]
                 // [STAGE: (VL)(L)]
                 if(receivedRTicket.getRTicketType().equals(UTicket.TYPE_OWNERSHIP_UTICKET)) {
                     storedUTicketJson = this.sharedData.getDeviceTable().get(receivedRTicket.getDeviceId()).getDeviceOwnershipUTicketForOthers();

@@ -38,44 +38,81 @@ import ureka.framework.Environment;
 import ureka.framework.logic.DeviceController;
 import ureka.framework.model.data_model.ThisDevice;
 import ureka.framework.model.message_model.Message;
+import ureka.framework.model.message_model.RTicket;
 import ureka.framework.model.message_model.UTicket;
 import ureka.framework.resource.crypto.SerializationUtil;
+import ureka.framework.resource.logger.SimpleLogger;
 
 public class VoterAgentActivity extends AppCompatActivity {
     private DeviceController deviceController;
-    private String connectedDeviceId; // The deviceId of the voting machine
-    private int votedCandidate;
 
-    private Button buttonScan;
+    // Data
+    public static String connectedDeviceId; // The device_id of the voting machine
+    public static String permissionlessData;
+    private int votedCandidate;
+    private int stage = 0;
+    // Stage indicates the actions taken:
+    // 0: Before request UTicket
+    // 1: Before Apply Voting UTicket
+    // 2: Before Send Voting RTicket to Admin
+    // 3: After Send Voting RTicket to Admin
+
+    private TextView textViewConnectingStatus;
     private Button buttonConnect;
+    private Button buttonScan;
     private Button buttonRequestUTicket;
     private Button buttonApplyUTicket;
+    private Button buttonPermissionlessVoter;
+    private Button buttonSendRTicket;
     private Button buttonShowRTicket;
-    private TextView textViewConnectingStatus;
+    private Button buttonDisconnect;
+
+    // Queuing ticket sending
+    public static boolean sendNextTicket = false;
 
     private final ActivityResultLauncher<Intent> activityResultLauncher =
-            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
-                if (result.getResultCode() == Activity.RESULT_OK) {
-                    Intent data = result.getData();
-                    if (data != null) {
-                        votedCandidate = data.getIntExtra("VOTED_CANDIDATE", -1);
-                        buttonApplyUTicket.setEnabled(false);
-                        buttonShowRTicket.setEnabled(true);
-                    }
-
-                    if (votedCandidate != -1) {
-                        String cmd = "V:" + votedCandidate;
-                        deviceController.getFlowIssueUToken().holderSendCmd(connectedDeviceId, cmd, false);
-//                        this.iotDevice.getMsgReceiver()._recvXxxMessage();
-//                        this.userAgentDO.getMsgReceiver()._recvXxxMessage();
-                    } else {
-                        throw new RuntimeException("Invalid vote.");
-                    }
+        registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+            long startTime = System.nanoTime();
+            if (result.getResultCode() == Activity.RESULT_OK) {
+                Intent data = result.getData();
+                if (data != null) {
+                    votedCandidate = data.getIntExtra("VOTED_CANDIDATE", -1);
                 }
-            });
 
-    private BLEViewModel bleViewModel;
-    private NearbyViewModel nearbyViewModel;
+                if (votedCandidate != -1) {
+                    sendNextTicket = false;
+                    String cmd = "V:" + votedCandidate;
+                    deviceController.getFlowIssueUToken().holderSendCmd(connectedDeviceId, cmd, false);
+                    while (!sendNextTicket) {
+                        try {
+                            Thread.sleep(1000);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+
+                    sendNextTicket = false;
+                    deviceController.getFlowIssueUToken().holderSendCmd(connectedDeviceId, "ACCESS_END", true);
+                    while (!sendNextTicket) {
+                        try {
+                            Thread.sleep(1000);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+
+                    buttonApplyUTicket.setEnabled(false);
+                    buttonShowRTicket.setEnabled(true);
+                    buttonSendRTicket.setEnabled(true);
+                    stage = 2;
+                } else {
+                    throw new RuntimeException("Invalid vote.");
+                }
+            }
+            long endTime = System.nanoTime();
+            long duration = endTime - startTime;
+            SimpleLogger.simpleLog("info", "VoterAgentActivity: buttonApplyUTicket(PostVote) execution time: " + duration + " ns");
+        });
 
     @SuppressLint("MissingInflatedId")
     @Override
@@ -98,103 +135,223 @@ public class VoterAgentActivity extends AppCompatActivity {
         }
 
         // private fields initialization
-        bleViewModel = new ViewModelProvider(this).get(BLEViewModel.class);
-        nearbyViewModel = new ViewModelProvider(this).get(NearbyViewModel.class);
-
         deviceController = new DeviceController(ThisDevice.USER_AGENT_OR_CLOUD_SERVER, "User Agent");
         deviceController.getExecutor()._executeOneTimeInitializeAgentOrServer();
-        bleViewModel = new ViewModelProvider(this).get(BLEViewModel.class);
-        nearbyViewModel.getNearbyManager(Environment.applicationContext,deviceController.getMsgReceiver()).setViewModel(nearbyViewModel);
+        try {
+            deviceController.getSharedData().getThisPerson().setPersonPubKey(SerializationUtil.base64ToPublicKey(getIntent().getStringExtra("publicKey")));
+            deviceController.getSharedData().getThisPerson().setPersonPrivKey(SerializationUtil.base64ToPrivateKey(getIntent().getStringExtra("privateKey")));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        deviceController.getNearbyManager().setMsgReceiver(deviceController.getMsgReceiver());
+        SimpleLogger.simpleLog("info","MsgReceiver: "+(deviceController.getMsgReceiver()==null));
 
-        buttonScan = findViewById(R.id.buttonScanDevice);
+        textViewConnectingStatus = findViewById(R.id.textViewConnectingStatus);
         buttonConnect = findViewById(R.id.buttonConnect);
+        buttonScan = findViewById(R.id.buttonScanDevice);
         buttonRequestUTicket = findViewById(R.id.buttonRequestUTicket);
         buttonApplyUTicket = findViewById(R.id.buttonApplyUTicket);
+        buttonPermissionlessVoter = findViewById(R.id.buttonPermissionlessVoter);
+        buttonSendRTicket = findViewById(R.id.buttonSendRTicket);
         buttonShowRTicket = findViewById(R.id.buttonShowRTicket);
-        textViewConnectingStatus = findViewById(R.id.textViewConnectingStatus);
-        String mode = getIntent().getStringExtra("mode");
-        if (!Objects.equals(mode, "TEST")) {
-            buttonRequestUTicket.setEnabled(false);
-            buttonApplyUTicket.setEnabled(false);
-            buttonShowRTicket.setEnabled(false);
-        }
-        nearbyViewModel.getIsConnected().observe(this, isConnected -> {
+        buttonDisconnect = findViewById(R.id.buttonDisconnect2);
+
+        buttonRequestUTicket.setEnabled(false);
+        buttonApplyUTicket.setEnabled(false);
+        buttonPermissionlessVoter.setEnabled(false);
+        buttonShowRTicket.setEnabled(false);
+        buttonSendRTicket.setEnabled(false);
+
+        deviceController.getBleViewModel().getIsConnected().observe(this, isConnected -> {
+            SimpleLogger.simpleLog("info", "VoterAgentActivity: Voter Agent isConnected = " + isConnected);
             if (isConnected != null && isConnected) {
-                buttonRequestUTicket.setEnabled(true);
-                textViewConnectingStatus.setText("Connected to Admin Agent");
+                textViewConnectingStatus.setText("Voter Agent connected to VM");
+                buttonPermissionlessVoter.setEnabled(true);
+                if (stage == 1) {
+                    buttonApplyUTicket.setEnabled(true);
+                }
             } else {
-                buttonRequestUTicket.setEnabled(false);
                 textViewConnectingStatus.setText("Not connected");
+                buttonApplyUTicket.setEnabled(false);
+                buttonPermissionlessVoter.setEnabled(false);
+            }
+        });
+
+        deviceController.getNearbyViewModel().getIsConnected().observe(this, isConnected -> {
+            if (isConnected != null && isConnected) {
+                textViewConnectingStatus.setText("Voter Agent connected to Admin Agent");
+                if (stage == 0) {
+                    buttonRequestUTicket.setEnabled(true);
+                } else if (stage == 2) {
+                    buttonSendRTicket.setEnabled(true);
+                }
+            } else {
+                textViewConnectingStatus.setText("Not connected");
+                buttonRequestUTicket.setEnabled(false);
+                buttonSendRTicket.setEnabled(false);
             }
         });
 
         buttonConnect.setOnClickListener(view -> {
-            bleViewModel.getBLEManager(Environment.applicationContext).disconnect();
-            nearbyViewModel.getNearbyManager(Environment.applicationContext, deviceController.getMsgReceiver()).startDiscovery();
-        });
-
-        buttonRequestUTicket.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                String generatedTaskScope = SerializationUtil.dictToJsonStr(Map.of("ALL", "allow"));
-                Map<String, String> generatedRequest = Map.of(
-                        "holderId", deviceController.getSharedData().getThisPerson().getPersonPubKeyStr(),
-                        "uTicketType", UTicket.TYPE_ACCESS_UTICKET,
-                        "taskScope", generatedTaskScope
-                );
-                try {
-                    deviceController.getMsgSender().sendXxxMessageByNearby(
-                            Message.MESSAGE_REQUEST,
-                            Message.MESSAGE_REQUEST,
-                            SerializationUtil.dictToJsonStr(generatedRequest)
-                    );
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-//                deviceController.getMsgReceiver()._recvXxxMessage();
+            if (deviceController.getBleManager()!= null && deviceController.getBleManager().isConnected()) {
+                deviceController.getBleManager().getConnectionState().observe(VoterAgentActivity.this, isConnected -> {
+                    if (isConnected != null && !isConnected) {
+                        deviceController.getNearbyViewModel().getNearbyManager(Environment.applicationContext, deviceController.getMsgReceiver()).startDiscovery();
+                        deviceController.getBleManager().getConnectionState().removeObservers(VoterAgentActivity.this);
+                    }
+                });
+                deviceController.getBleManager().disconnect();
+            } else {
+                deviceController.getNearbyViewModel().getNearbyManager(Environment.applicationContext, deviceController.getMsgReceiver()).startDiscovery();
             }
         });
 
         buttonScan.setOnClickListener(view -> {
-            nearbyViewModel.getNearbyManager(Environment.applicationContext, deviceController.getMsgReceiver()).stopAllActions();
+            deviceController.getNearbyViewModel().getNearbyManager(Environment.applicationContext, deviceController.getMsgReceiver()).stopAllActions();
             deviceController.connectToDevice("HC-04BLE",
                     () -> runOnUiThread(() -> {
-                        Toast.makeText(VoterAgentActivity.this, "Device connected!", Toast.LENGTH_SHORT).show();
-                        buttonApplyUTicket.setEnabled(true);
+                        Toast.makeText(VoterAgentActivity.this, "Voter Agent connected to VM", Toast.LENGTH_SHORT).show();
+                        textViewConnectingStatus.setText("Voter Agent connected to VM");
+                        buttonPermissionlessVoter.setEnabled(true);
+                        if (stage == 1) {
+                            buttonApplyUTicket.setEnabled(true);
+                        }
                     }),
                     () -> runOnUiThread(() -> {
                         Toast.makeText(VoterAgentActivity.this, "Device disconnected!", Toast.LENGTH_SHORT).show();
                         buttonApplyUTicket.setEnabled(false);
+                        buttonPermissionlessVoter.setEnabled(false);
                     }),
                     textViewConnectingStatus
             );
         });
 
+        buttonRequestUTicket.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                long startTime = System.nanoTime();
+                String generatedTaskScope = "{\"ALL\": \"allow\"}";
+                Map<String, String> generatedRequest = Map.of(
+                    "holder_id", deviceController.getSharedData().getThisPerson().getPersonPubKeyStr(),
+                    "u_ticket_type", UTicket.TYPE_ACCESS_UTICKET,
+                    "task_scope", generatedTaskScope
+                );
+                try {
+                    deviceController.getMsgSender().sendXxxMessageByNearby(
+                        Message.MESSAGE_REQUEST,
+                        Message.MESSAGE_REQUEST,
+                        SerializationUtil.mapToJson(generatedRequest)
+                    );
+                    stage = 1;
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                long endTime = System.nanoTime();
+                long duration = endTime - startTime;
+                SimpleLogger.simpleLog("info", "VoterAgentActivity: buttonRequestUTicket execution time: " + duration + " ns");
+            }
+        });
+
         buttonApplyUTicket.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                // TODO
-                String targetDeviceId = connectedDeviceId; // = this.iotDevice.getSharedData().getThisDevice().getDevicePubKeyStr();
+                long startTime = System.nanoTime();
+                String targetDeviceId = connectedDeviceId;
                 String generatedCommand = "HELLO-1";
                 deviceController.getFlowApplyUTicket().holderApplyUTicket(targetDeviceId,generatedCommand);
-//                this.iotDevice.getMsgReceiver()._recvXxxMessage();
-//                this.cloudServerEP.getMsgReceiver()._recvXxxMessage();
-//                this.iotDevice.getMsgReceiver()._recvXxxMessage();
-//                this.cloudServerEP.getMsgReceiver()._recvXxxMessage();
 
+                while (!sendNextTicket) {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+                sendNextTicket = false;
                 String data = "A";
                 deviceController.getFlowIssueUToken().holderSendCmd(connectedDeviceId, data, false);
-//                this.iotDevice.getMsgReceiver()._recvXxxMessage();
-//                this.userAgentDO.getMsgReceiver()._recvXxxMessage();
+                while (!sendNextTicket || deviceController.getFlowIssueUToken().getExecutor().getSharedData().getCurrentSession().getPlaintextData() == null) {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
                 data = deviceController.getFlowIssueUToken().getExecutor().getSharedData().getCurrentSession().getPlaintextData();
-                data = data.replaceAll("[0-9]", "");
-                String[] result = data.split("\\.");
+                SimpleLogger.simpleLog("info", "raw DATA = " + data);
+                String[] result = data.split(":");
                 ArrayList<String> candidates = new ArrayList<>();
-                Collections.addAll(candidates, result);
+                for (int i = 1; i < result.length; i += 2) {
+                    candidates.add(result[i]);
+                }
+                SimpleLogger.simpleLog("info", "candidate list = " + candidates);
 
+                long endTime = System.nanoTime();
+                long duration = endTime - startTime;
+                SimpleLogger.simpleLog("info", "VoterAgentActivity: buttonApplyUTicket(PreVote) execution time: " + duration + " ns");
                 Intent intent = new Intent(VoterAgentActivity.this, VoterAgentVotingActivity.class);
                 intent.putStringArrayListExtra("CANDIDATES", candidates);
                 activityResultLauncher.launch(intent);
+            }
+        });
+
+        buttonPermissionlessVoter.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                try {
+                    long startTime = System.nanoTime();
+                    sendNextTicket = false;
+                    deviceController.getMsgSender().sendXxxMessage(
+                            Message.MESSAGE_PERMISSIONLESS,
+                            Message.MESSAGE_PERMISSIONLESS,
+                            ""
+                    );
+                    while (!sendNextTicket) {
+                        try {
+                            Thread.sleep(1000);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                    Map<String, String> data = SerializationUtil.jsonToMap(permissionlessData);
+                    ArrayList<String> candidatesList = new ArrayList<>(), votersList = new ArrayList<>();
+                    for (String key : data.keySet()) {
+                        if (key.contains("candidate")) {
+                            candidatesList.add(data.get(key));
+                        } else if (key.contains("voter")) {
+                            votersList.add(data.get(key));
+                        }
+                    }
+                    long endTime = System.nanoTime();
+                    long duration = endTime - startTime;
+                    SimpleLogger.simpleLog("info", "VoterAgentActivity: buttonPermissionlessVoter execution time: " + duration + " ns");
+                    Intent intent = new Intent(VoterAgentActivity.this, PermissionlessActivity.class);
+                    intent.putStringArrayListExtra("candidatesList", candidatesList);
+                    intent.putStringArrayListExtra("votersList", votersList);
+                    startActivity(intent);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        });
+
+        buttonSendRTicket.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                long startTime = System.nanoTime();
+                sendNextTicket = false;
+                deviceController.getFlowIssuerIssueUTicket().holderSendRTicketToIssuer(connectedDeviceId);
+                while (!sendNextTicket) {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+                long endTime = System.nanoTime();
+                long duration = endTime - startTime;
+                SimpleLogger.simpleLog("info", "VoterAgentActivity: buttonSendRTicket execution time: " + duration + " ns");
+                stage = 3;
             }
         });
 
@@ -203,8 +360,17 @@ public class VoterAgentActivity extends AppCompatActivity {
             public void onClick(View v) {
                 Intent intent = new Intent(VoterAgentActivity.this, VoterAgentResultActivity.class);
 
-                intent.putExtra("PUBLIC_KEY", deviceController.getExecutor().getSharedData().getThisDevice().getDevicePubKeyStr());
+                intent.putExtra("PUBLIC_KEY", deviceController.getSharedData().getThisPerson().getPersonPubKeyStr());
                 startActivity(intent);
+            }
+        });
+
+        buttonDisconnect.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                deviceController.getBleManager().disconnect();
+                deviceController.getNearbyManager().stopAllActions();
+                deviceController.getNearbyManager().disconnectFromAllEndpoints();
             }
         });
 
@@ -231,11 +397,9 @@ public class VoterAgentActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (bleViewModel != null) {
-            BLEManager bleManager = bleViewModel.getBLEManager(this);
-            if (bleManager != null) {
-                bleManager.disconnect();
-            }
+        BLEManager bleManager = deviceController.getBleManager();
+        if (bleManager != null) {
+            bleManager.disconnect();
         }
     }
 }
